@@ -19,34 +19,86 @@ This application has to run tests manually instead of using pytest because
 pytest currently doesn't work on App Engine standard.
 """
 
-# [START gae_python37_app]
-from flask import Flask
-from google.auth import compute_engine
+import contextlib
+import sys
+from StringIO import StringIO
+import traceback
+
 import google.auth.transport.urllib3
 import urllib3.contrib.appengine
+import webapp2
+
+FAILED_TEST_TMPL = """
+Test {} failed: {}
+Stacktrace:
+{}
+Captured output:
+{}
+"""
 
 HTTP = urllib3.contrib.appengine.AppEngineManager()
 HTTP_REQUEST = google.auth.transport.urllib3.Request(HTTP)
 
-# If `entrypoint` is not defined in app.yaml, App Engine will look for an app
-# called `app` in `main.py`.
-app = Flask(__name__)
 
-
-@app.route("/")
-def hello():
-    """Return a friendly HTTP greeting."""
+def test_id_token():
     credentials = compute_engine.IDTokenCredentials(
         HTTP_REQUEST, "target_audience", use_metadata_identity_endpoint=True
     )
     credentials.refresh(http_request)
     print(credentials.token)
-    return credentials.token
+    assert credentials.token is not None
 
 
-if __name__ == "__main__":
-    # This is used when running locally only. When deploying to Google App
-    # Engine, a webserver process such as Gunicorn will serve the app. This
-    # can be configured by adding an `entrypoint` to app.yaml.
-    app.run(host="127.0.0.1", port=8080, debug=True)
-# [END gae_python37_app]
+@contextlib.contextmanager
+def capture():
+    """Context manager that captures stderr and stdout."""
+    oldout, olderr = sys.stdout, sys.stderr
+    try:
+        out = StringIO()
+        sys.stdout, sys.stderr = out, out
+        yield out
+    finally:
+        sys.stdout, sys.stderr = oldout, olderr
+
+
+def run_test_func(func):
+    with capture() as capsys:
+        try:
+            func()
+            return True, ""
+        except Exception as exc:
+            output = FAILED_TEST_TMPL.format(
+                func.func_name, exc, traceback.format_exc(), capsys.getvalue()
+            )
+            return False, output
+
+
+def run_tests():
+    """Runs all tests.
+    Returns:
+        Tuple[bool, str]: A tuple containing True if all tests pass, False
+        otherwise, and any captured output from the tests.
+    """
+    status = True
+    output = ""
+
+    test_status, test_output = run_test_func(test_id_token)
+    status = status and test_status
+    output += test_output
+
+    return status, output
+
+
+class MainHandler(webapp2.RequestHandler):
+    def get(self):
+        self.response.headers["content-type"] = "text/plain"
+
+        status, output = run_tests()
+
+        if not status:
+            self.response.status = 500
+
+        self.response.write(output)
+
+
+app = webapp2.WSGIApplication([("/", MainHandler)], debug=True)
