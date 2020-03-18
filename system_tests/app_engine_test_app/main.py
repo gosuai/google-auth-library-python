@@ -117,7 +117,7 @@ def run_tests():
     status = True
     output = ""
 
-    tests = (test_credentials, test_default)
+    tests = test_id_token_credentials
 
     for test in tests:
         test_status, test_output = run_test_func(test)
