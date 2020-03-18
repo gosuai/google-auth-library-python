@@ -29,6 +29,7 @@ from google.appengine.api import app_identity
 import google.auth
 from google.auth import _helpers
 from google.auth import app_engine
+from google.auth import compute_engine
 import google.auth.transport.urllib3
 import urllib3.contrib.appengine
 import webapp2
@@ -72,6 +73,14 @@ def test_default():
 
     assert isinstance(credentials, app_engine.Credentials)
     assert project_id == app_identity.get_application_id()
+
+
+def test_id_token_credentials():
+    credentials = compute_engine.IDTokenCredentials(
+        http_request, "target_audience", use_metadata_identity_endpoint=True
+    )
+    credentials.refresh(http_request)
+    print(credentials.token)
 
 
 @contextlib.contextmanager
