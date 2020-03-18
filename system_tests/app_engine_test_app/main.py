@@ -19,124 +19,34 @@ This application has to run tests manually instead of using pytest because
 pytest currently doesn't work on App Engine standard.
 """
 
-import contextlib
-import json
-import sys
-from StringIO import StringIO
-import traceback
-
-from google.appengine.api import app_identity
-import google.auth
-from google.auth import _helpers
-from google.auth import app_engine
+# [START gae_python37_app]
+from flask import Flask
 from google.auth import compute_engine
 import google.auth.transport.urllib3
 import urllib3.contrib.appengine
-import webapp2
 
-FAILED_TEST_TMPL = """
-Test {} failed: {}
-
-Stacktrace:
-{}
-
-Captured output:
-{}
-"""
-TOKEN_INFO_URL = "https://www.googleapis.com/oauth2/v3/tokeninfo"
-EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
 HTTP = urllib3.contrib.appengine.AppEngineManager()
 HTTP_REQUEST = google.auth.transport.urllib3.Request(HTTP)
 
-
-def test_credentials():
-    credentials = app_engine.Credentials()
-    scoped_credentials = credentials.with_scopes([EMAIL_SCOPE])
-
-    scoped_credentials.refresh(None)
-
-    assert scoped_credentials.valid
-    assert scoped_credentials.token is not None
-
-    # Get token info and verify scope
-    url = _helpers.update_query(
-        TOKEN_INFO_URL, {"access_token": scoped_credentials.token}
-    )
-    response = HTTP_REQUEST(url=url, method="GET")
-    token_info = json.loads(response.data.decode("utf-8"))
-
-    assert token_info["scope"] == EMAIL_SCOPE
+# If `entrypoint` is not defined in app.yaml, App Engine will look for an app
+# called `app` in `main.py`.
+app = Flask(__name__)
 
 
-def test_default():
-    credentials, project_id = google.auth.default()
-
-    assert isinstance(credentials, app_engine.Credentials)
-    assert project_id == app_identity.get_application_id()
-
-
-def test_id_token_credentials():
+@app.route("/")
+def hello():
+    """Return a friendly HTTP greeting."""
     credentials = compute_engine.IDTokenCredentials(
-        http_request, "target_audience", use_metadata_identity_endpoint=True
+        HTTP_REQUEST, "target_audience", use_metadata_identity_endpoint=True
     )
     credentials.refresh(http_request)
     print(credentials.token)
+    return credentials.token
 
 
-@contextlib.contextmanager
-def capture():
-    """Context manager that captures stderr and stdout."""
-    oldout, olderr = sys.stdout, sys.stderr
-    try:
-        out = StringIO()
-        sys.stdout, sys.stderr = out, out
-        yield out
-    finally:
-        sys.stdout, sys.stderr = oldout, olderr
-
-
-def run_test_func(func):
-    with capture() as capsys:
-        try:
-            func()
-            return True, ""
-        except Exception as exc:
-            output = FAILED_TEST_TMPL.format(
-                func.func_name, exc, traceback.format_exc(), capsys.getvalue()
-            )
-            return False, output
-
-
-def run_tests():
-    """Runs all tests.
-
-    Returns:
-        Tuple[bool, str]: A tuple containing True if all tests pass, False
-        otherwise, and any captured output from the tests.
-    """
-    status = True
-    output = ""
-
-    tests = test_id_token_credentials
-
-    for test in tests:
-        test_status, test_output = run_test_func(test)
-        status = status and test_status
-        output += test_output
-
-    return status, output
-
-
-class MainHandler(webapp2.RequestHandler):
-    def get(self):
-        self.response.headers["content-type"] = "text/plain"
-
-        status, output = run_tests()
-
-        if not status:
-            self.response.status = 500
-
-        self.response.write(output)
-
-
-app = webapp2.WSGIApplication([("/", MainHandler)], debug=True)
+if __name__ == "__main__":
+    # This is used when running locally only. When deploying to Google App
+    # Engine, a webserver process such as Gunicorn will serve the app. This
+    # can be configured by adding an `entrypoint` to app.yaml.
+    app.run(host="127.0.0.1", port=8080, debug=True)
+# [END gae_python37_app]
