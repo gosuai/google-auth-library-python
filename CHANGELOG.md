@@ -4,6 +4,18 @@
 
 [1]: https://pypi.org/project/google-auth/#history
 
+## [1.12.0](https://www.github.com/googleapis/google-auth-library-python/compare/v1.11.3...v1.12.0) (2020-03-19)
+
+
+### Features
+
+* add SslCredentials class for mTLS ADC ([#448](https://www.github.com/googleapis/google-auth-library-python/issues/448)) ([dafb41f](https://www.github.com/googleapis/google-auth-library-python/commit/dafb41fae3f513ea9a4f93404f6148bee7dda202))
+
+
+### Bug Fixes
+
+* make ThreadPoolExecutor a class var ([#461](https://www.github.com/googleapis/google-auth-library-python/issues/461)) ([b526473](https://www.github.com/googleapis/google-auth-library-python/commit/b5264730603947295cc97ecff2f6aef84aa3d6e9))
+
 ### [1.11.3](https://www.github.com/googleapis/google-auth-library-python/compare/v1.11.2...v1.11.3) (2020-03-13)
 
 
