@@ -17,6 +17,7 @@
 from __future__ import absolute_import
 
 import logging
+import os
 import warnings
 
 # Certifi is Mozilla's certificate bundle. Urllib3 needs a certificate bundle
@@ -45,6 +46,7 @@ except ImportError as caught_exc:  # pragma: NO COVER
 import six
 import urllib3.exceptions  # pylint: disable=ungrouped-imports
 
+from google.auth import environment_vars
 from google.auth import exceptions
 from google.auth import transport
 
@@ -202,13 +204,18 @@ class AuthorizedHttp(urllib3.request.RequestMethods):
     credentials' headers to the request and refreshing credentials as needed.
 
     This class also supports mutual TLS via :meth:`configure_mtls_channel`
-    method. If client_cert_callabck is provided, client certificate and private
-    key are loaded using the callback; if client_cert_callabck is None,
+    method. In order to use this method, the `GOOGLE_API_USE_CLIENT_CERTIFICATE`
+    environment variable must be explicitly set to `true`, otherwise it does
+    nothing. Assume the environment is set to `true`, the method behaves in the
+    following manner:
+    If client_cert_callback is provided, client certificate and private
+    key are loaded using the callback; if client_cert_callback is None,
     application default SSL credentials will be used. Exceptions are raised if
     there are problems with the certificate, private key, or the loading process,
     so it should be called within a try/except block.
 
-    First we create an :class:`AuthorizedHttp` instance and specify the endpoints::
+    First we set the environment variable to `true`, then create an :class:`AuthorizedHttp`
+    instance and specify the endpoints::
 
         regular_endpoint = 'https://pubsub.googleapis.com/v1/projects/{my_project_id}/topics'
         mtls_endpoint = 'https://pubsub.mtls.googleapis.com/v1/projects/{my_project_id}/topics'
@@ -280,14 +287,18 @@ class AuthorizedHttp(urllib3.request.RequestMethods):
 
         super(AuthorizedHttp, self).__init__()
 
-    def configure_mtls_channel(self, client_cert_callabck=None):
-        """Configures mutual TLS channel using the given client_cert_callabck or
-        application default SSL credentials. Returns True if the channel is
-        mutual TLS and False otherwise. Note that the `http` provided in the
-        constructor will be overwritten.
+    def configure_mtls_channel(self, client_cert_callback=None):
+        """Configures mutual TLS channel using the given client_cert_callback or
+        application default SSL credentials. The behavior is controlled by
+        `GOOGLE_API_USE_CLIENT_CERTIFICATE` environment variable.
+        (1) If the environment variable value is `true`, the function returns True
+        if the channel is mutual TLS and False otherwise. The `http` provided
+        in the constructor will be overwritten.
+        (2) If the environment variable is not set or `false`, the function does
+        nothing and it always return False.
 
         Args:
-            client_cert_callabck (Optional[Callable[[], (bytes, bytes)]]):
+            client_cert_callback (Optional[Callable[[], (bytes, bytes)]]):
                 The optional callback returns the client certificate and private
                 key bytes both in PEM format.
                 If the callback is None, application default SSL credentials
@@ -297,24 +308,37 @@ class AuthorizedHttp(urllib3.request.RequestMethods):
             True if the channel is mutual TLS and False otherwise.
 
         Raises:
-            ImportError: If certifi or pyOpenSSL is not installed.
-            OpenSSL.crypto.Error: If client cert or key is invalid.
-            OSError: If the cert provider command launch fails during the
-                application default SSL credentials loading process.
-            RuntimeError: If the cert provider command has a runtime error during
-                the application default SSL credentials loading process.
-            ValueError: If the context aware metadata file is malformed or the
-                cert provider command doesn't produce both client certicate and
-                key during the application default SSL credentials loading process.
+            google.auth.exceptions.MutualTLSChannelError: If mutual TLS channel
+                creation failed for any reason.
         """
-        found_cert_key, cert, key = transport._mtls_helper.get_client_cert_and_key(
-            client_cert_callabck
+        use_client_cert = os.getenv(
+            environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE, "false"
         )
+        if use_client_cert != "true":
+            return False
 
-        if found_cert_key:
-            self.http = _make_mutual_tls_http(cert, key)
-        else:
-            self.http = _make_default_http()
+        try:
+            import OpenSSL
+        except ImportError as caught_exc:
+            new_exc = exceptions.MutualTLSChannelError(caught_exc)
+            six.raise_from(new_exc, caught_exc)
+
+        try:
+            found_cert_key, cert, key = transport._mtls_helper.get_client_cert_and_key(
+                client_cert_callback
+            )
+
+            if found_cert_key:
+                self.http = _make_mutual_tls_http(cert, key)
+            else:
+                self.http = _make_default_http()
+        except (
+            exceptions.ClientCertError,
+            ImportError,
+            OpenSSL.crypto.Error,
+        ) as caught_exc:
+            new_exc = exceptions.MutualTLSChannelError(caught_exc)
+            six.raise_from(new_exc, caught_exc)
 
         if self._has_user_provided_http:
             self._has_user_provided_http = False

@@ -32,9 +32,16 @@ from google.auth import exceptions
 
 _LOGGER = logging.getLogger(__name__)
 
-_METADATA_ROOT = "http://{}/computeMetadata/v1/".format(
-    os.getenv(environment_vars.GCE_METADATA_ROOT, "metadata.google.internal")
-)
+# Environment variable GCE_METADATA_HOST is originally named
+# GCE_METADATA_ROOT. For compatiblity reasons, here it checks
+# the new variable first; if not set, the system falls back
+# to the old variable.
+_GCE_METADATA_HOST = os.getenv(environment_vars.GCE_METADATA_HOST, None)
+if not _GCE_METADATA_HOST:
+    _GCE_METADATA_HOST = os.getenv(
+        environment_vars.GCE_METADATA_ROOT, "metadata.google.internal"
+    )
+_METADATA_ROOT = "http://{}/computeMetadata/v1/".format(_GCE_METADATA_HOST)
 
 # This is used to ping the metadata server, it avoids the cost of a DNS
 # lookup.
@@ -88,11 +95,13 @@ def ping(request, timeout=_METADATA_DEFAULT_TIMEOUT, retry_count=3):
                 and metadata_flavor == _METADATA_FLAVOR_VALUE
             )
 
-        except exceptions.TransportError:
-            _LOGGER.info(
-                "Compute Engine Metadata server unavailable on" "attempt %s of %s",
+        except exceptions.TransportError as e:
+            _LOGGER.warning(
+                "Compute Engine Metadata server unavailable on"
+                "attempt %s of %s. Reason: %s",
                 retries + 1,
                 retry_count,
+                e,
             )
             retries += 1
 
@@ -137,11 +146,13 @@ def get(request, path, root=_METADATA_ROOT, recursive=False, retry_count=5):
             response = request(url=url, method="GET", headers=_METADATA_HEADERS)
             break
 
-        except exceptions.TransportError:
-            _LOGGER.info(
-                "Compute Engine Metadata server unavailable on" "attempt %s of %s",
+        except exceptions.TransportError as e:
+            _LOGGER.warning(
+                "Compute Engine Metadata server unavailable on"
+                "attempt %s of %s. Reason: %s",
                 retries + 1,
                 retry_count,
+                e,
             )
             retries += 1
     else:

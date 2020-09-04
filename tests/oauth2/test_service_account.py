@@ -147,6 +147,14 @@ class TestCredentials(object):
         new_credentials = credentials.with_claims({"meep": "moop"})
         assert new_credentials._additional_claims == {"meep": "moop"}
 
+    def test_with_quota_project(self):
+        credentials = self.make_credentials()
+        new_credentials = credentials.with_quota_project("new-project-456")
+        assert new_credentials.quota_project_id == "new-project-456"
+        hdrs = {}
+        new_credentials.apply(hdrs, token="tok")
+        assert "x-goog-user-project" in hdrs
+
     def test__make_authorization_grant_assertion(self):
         credentials = self.make_credentials()
         token = credentials._make_authorization_grant_assertion()
@@ -169,6 +177,31 @@ class TestCredentials(object):
         token = credentials._make_authorization_grant_assertion()
         payload = jwt.decode(token, PUBLIC_CERT_BYTES)
         assert payload["sub"] == subject
+
+    def test_apply_with_quota_project_id(self):
+        credentials = service_account.Credentials(
+            SIGNER,
+            self.SERVICE_ACCOUNT_EMAIL,
+            self.TOKEN_URI,
+            quota_project_id="quota-project-123",
+        )
+
+        headers = {}
+        credentials.apply(headers, token="token")
+
+        assert headers["x-goog-user-project"] == "quota-project-123"
+        assert "token" in headers["authorization"]
+
+    def test_apply_with_no_quota_project_id(self):
+        credentials = service_account.Credentials(
+            SIGNER, self.SERVICE_ACCOUNT_EMAIL, self.TOKEN_URI
+        )
+
+        headers = {}
+        credentials.apply(headers, token="token")
+
+        assert "x-goog-user-project" not in headers
+        assert "token" in headers["authorization"]
 
     @mock.patch("google.oauth2._client.jwt_grant", autospec=True)
     def test_refresh_success(self, jwt_grant):
@@ -282,6 +315,11 @@ class TestIDTokenCredentials(object):
         credentials = self.make_credentials()
         new_credentials = credentials.with_target_audience("https://new.example.com")
         assert new_credentials._target_audience == "https://new.example.com"
+
+    def test_with_quota_project(self):
+        credentials = self.make_credentials()
+        new_credentials = credentials.with_quota_project("project-foo")
+        assert new_credentials._quota_project_id == "project-foo"
 
     def test__make_authorization_grant_assertion(self):
         credentials = self.make_credentials()

@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
+
 import mock
 import OpenSSL
 import pytest
 from six.moves import http_client
 import urllib3
 
+from google.auth import environment_vars
+from google.auth import exceptions
 import google.auth.credentials
 import google.auth.transport._mtls_helper
 import google.auth.transport.urllib3
@@ -61,6 +66,9 @@ class CredentialsStub(google.auth.credentials.Credentials):
 
     def refresh(self, request):
         self.token += "1"
+
+    def with_quota_project(self, quota_project_id):
+        raise NotImplementedError()
 
 
 class HttpStub(object):
@@ -173,7 +181,10 @@ class TestAuthorizedHttp(object):
         )
 
         with pytest.warns(UserWarning):
-            is_mtls = authed_http.configure_mtls_channel(callback)
+            with mock.patch.dict(
+                os.environ, {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"}
+            ):
+                is_mtls = authed_http.configure_mtls_channel(callback)
 
         assert is_mtls
         mock_make_mutual_tls_http.assert_called_once_with(
@@ -196,7 +207,10 @@ class TestAuthorizedHttp(object):
             pytest.public_cert_bytes,
             pytest.private_key_bytes,
         )
-        is_mtls = authed_http.configure_mtls_channel()
+        with mock.patch.dict(
+            os.environ, {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"}
+        ):
+            is_mtls = authed_http.configure_mtls_channel()
 
         assert is_mtls
         mock_get_client_cert_and_key.assert_called_once()
@@ -216,8 +230,58 @@ class TestAuthorizedHttp(object):
         )
 
         mock_get_client_cert_and_key.return_value = (False, None, None)
-        is_mtls = authed_http.configure_mtls_channel()
+        with mock.patch.dict(
+            os.environ, {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"}
+        ):
+            is_mtls = authed_http.configure_mtls_channel()
 
         assert not is_mtls
         mock_get_client_cert_and_key.assert_called_once()
         mock_make_mutual_tls_http.assert_not_called()
+
+    @mock.patch(
+        "google.auth.transport._mtls_helper.get_client_cert_and_key", autospec=True
+    )
+    def test_configure_mtls_channel_exceptions(self, mock_get_client_cert_and_key):
+        authed_http = google.auth.transport.urllib3.AuthorizedHttp(
+            credentials=mock.Mock()
+        )
+
+        mock_get_client_cert_and_key.side_effect = exceptions.ClientCertError()
+        with pytest.raises(exceptions.MutualTLSChannelError):
+            with mock.patch.dict(
+                os.environ, {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"}
+            ):
+                authed_http.configure_mtls_channel()
+
+        mock_get_client_cert_and_key.return_value = (False, None, None)
+        with mock.patch.dict("sys.modules"):
+            sys.modules["OpenSSL"] = None
+            with pytest.raises(exceptions.MutualTLSChannelError):
+                with mock.patch.dict(
+                    os.environ,
+                    {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"},
+                ):
+                    authed_http.configure_mtls_channel()
+
+    @mock.patch(
+        "google.auth.transport._mtls_helper.get_client_cert_and_key", autospec=True
+    )
+    def test_configure_mtls_channel_without_client_cert_env(
+        self, get_client_cert_and_key
+    ):
+        callback = mock.Mock()
+
+        authed_http = google.auth.transport.urllib3.AuthorizedHttp(
+            credentials=mock.Mock(), http=mock.Mock()
+        )
+
+        # Test the callback is not called if GOOGLE_API_USE_CLIENT_CERTIFICATE is not set.
+        is_mtls = authed_http.configure_mtls_channel(callback)
+        assert not is_mtls
+        callback.assert_not_called()
+
+        # Test ADC client cert is not used if GOOGLE_API_USE_CLIENT_CERTIFICATE is not set.
+        is_mtls = authed_http.configure_mtls_channel(callback)
+        assert not is_mtls
+        get_client_cert_and_key.assert_not_called()

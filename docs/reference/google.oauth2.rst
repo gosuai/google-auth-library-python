@@ -17,6 +17,7 @@ Submodules
 ----------
 
 .. toctree::
+   :maxdepth: 4
 
    google.oauth2.credentials
    google.oauth2.id_token

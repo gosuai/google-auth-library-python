@@ -49,11 +49,11 @@ https://cloud.google.com/docs/authentication/getting-started
 # Warning when using Cloud SDK user credentials
 _CLOUD_SDK_CREDENTIALS_WARNING = """\
 Your application has authenticated using end user credentials from Google \
-Cloud SDK. We recommend that most server applications use service accounts \
-instead. If your application continues to use end user credentials from Cloud \
-SDK, you might receive a "quota exceeded" or "API not enabled" error. For \
-more information about service accounts, see \
-https://cloud.google.com/docs/authentication/"""
+Cloud SDK without a quota project. You might receive a "quota exceeded" \
+or "API not enabled" error. We recommend you rerun \
+`gcloud auth application-default login` and make sure a quota project is \
+added. Or you can use service accounts instead. For more information \
+about service accounts, see https://cloud.google.com/docs/authentication/"""
 
 
 def _warn_about_problematic_credentials(credentials):
@@ -69,14 +69,19 @@ def _warn_about_problematic_credentials(credentials):
         warnings.warn(_CLOUD_SDK_CREDENTIALS_WARNING)
 
 
-def _load_credentials_from_file(filename):
-    """Loads credentials from a file.
+def load_credentials_from_file(filename, scopes=None, quota_project_id=None):
+    """Loads Google credentials from a file.
 
     The credentials file must be a service account key or stored authorized
     user credentials.
 
     Args:
         filename (str): The full path to the credentials file.
+        scopes (Optional[Sequence[str]]): The list of scopes for the credentials. If
+            specified, the credentials will automatically be scoped if
+            necessary
+        quota_project_id (Optional[str]):  The project ID used for
+                quota and billing.
 
     Returns:
         Tuple[google.auth.credentials.Credentials, Optional[str]]: Loaded
@@ -106,27 +111,35 @@ def _load_credentials_from_file(filename):
     credential_type = info.get("type")
 
     if credential_type == _AUTHORIZED_USER_TYPE:
-        from google.auth import _cloud_sdk
+        from google.oauth2 import credentials
 
         try:
-            credentials = _cloud_sdk.load_authorized_user_credentials(info)
+            credentials = credentials.Credentials.from_authorized_user_info(
+                info, scopes=scopes
+            )
         except ValueError as caught_exc:
             msg = "Failed to load authorized user credentials from {}".format(filename)
             new_exc = exceptions.DefaultCredentialsError(msg, caught_exc)
             six.raise_from(new_exc, caught_exc)
-        # Authorized user credentials do not contain the project ID.
-        _warn_about_problematic_credentials(credentials)
+        if quota_project_id:
+            credentials = credentials.with_quota_project(quota_project_id)
+        if not credentials.quota_project_id:
+            _warn_about_problematic_credentials(credentials)
         return credentials, None
 
     elif credential_type == _SERVICE_ACCOUNT_TYPE:
         from google.oauth2 import service_account
 
         try:
-            credentials = service_account.Credentials.from_service_account_info(info)
+            credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=scopes
+            )
         except ValueError as caught_exc:
             msg = "Failed to load service account credentials from {}".format(filename)
             new_exc = exceptions.DefaultCredentialsError(msg, caught_exc)
             six.raise_from(new_exc, caught_exc)
+        if quota_project_id:
+            credentials = credentials.with_quota_project(quota_project_id)
         return credentials, info.get("project_id")
 
     else:
@@ -142,13 +155,16 @@ def _get_gcloud_sdk_credentials():
     """Gets the credentials and project ID from the Cloud SDK."""
     from google.auth import _cloud_sdk
 
+    _LOGGER.debug("Checking Cloud SDK credentials as part of auth process...")
+
     # Check if application default credentials exist.
     credentials_filename = _cloud_sdk.get_application_default_credentials_path()
 
     if not os.path.isfile(credentials_filename):
+        _LOGGER.debug("Cloud SDK credentials not found on disk; not using them")
         return None, None
 
-    credentials, project_id = _load_credentials_from_file(credentials_filename)
+    credentials, project_id = load_credentials_from_file(credentials_filename)
 
     if not project_id:
         project_id = _cloud_sdk.get_project_id()
@@ -161,8 +177,12 @@ def _get_explicit_environ_credentials():
     variable."""
     explicit_file = os.environ.get(environment_vars.CREDENTIALS)
 
+    _LOGGER.debug(
+        "Checking %s for explicit credentials as part of auth process...", explicit_file
+    )
+
     if explicit_file is not None:
-        credentials, project_id = _load_credentials_from_file(
+        credentials, project_id = load_credentials_from_file(
             os.environ[environment_vars.CREDENTIALS]
         )
 
@@ -177,8 +197,10 @@ def _get_gae_credentials():
     # While this library is normally bundled with app_engine, there are
     # some cases where it's not available, so we tolerate ImportError.
     try:
+        _LOGGER.debug("Checking for App Engine runtime as part of auth process...")
         import google.auth.app_engine as app_engine
     except ImportError:
+        _LOGGER.warning("Import of App Engine auth library failed.")
         return None, None
 
     try:
@@ -186,6 +208,9 @@ def _get_gae_credentials():
         project_id = app_engine.get_project_id()
         return credentials, project_id
     except EnvironmentError:
+        _LOGGER.debug(
+            "No App Engine library was found so cannot authentication via App Engine Identity Credentials."
+        )
         return None, None
 
 
@@ -202,6 +227,7 @@ def _get_gce_credentials(request=None):
         from google.auth import compute_engine
         from google.auth.compute_engine import _metadata
     except ImportError:
+        _LOGGER.warning("Import of Compute Engine auth library failed.")
         return None, None
 
     if request is None:
@@ -216,10 +242,13 @@ def _get_gce_credentials(request=None):
 
         return compute_engine.Credentials(), project_id
     else:
+        _LOGGER.warning(
+            "Authentication failed using Compute Engine authentication due to unavailable metadata server."
+        )
         return None, None
 
 
-def default(scopes=None, request=None):
+def default(scopes=None, request=None, quota_project_id=None):
     """Gets the default credentials for the current environment.
 
     `Application Default Credentials`_ provides an easy way to obtain
@@ -279,7 +308,8 @@ def default(scopes=None, request=None):
             HTTP requests. This is used to detect whether the application
             is running on Compute Engine. If not specified, then it will
             use the standard library http client to make requests.
-
+        quota_project_id (Optional[str]):  The project ID used for
+            quota and billing.
     Returns:
         Tuple[~google.auth.credentials.Credentials, Optional[str]]:
             the current environment's credentials and project ID. Project ID
@@ -308,6 +338,9 @@ def default(scopes=None, request=None):
         credentials, project_id = checker()
         if credentials is not None:
             credentials = with_scopes_if_required(credentials, scopes)
+            if quota_project_id:
+                credentials = credentials.with_quota_project(quota_project_id)
+
             effective_project_id = explicit_project_id or project_id
             if not effective_project_id:
                 _LOGGER.warning(

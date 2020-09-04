@@ -10,6 +10,7 @@ Subpackages
 -----------
 
 .. toctree::
+   :maxdepth: 4
 
    google.auth.aio
    google.auth.compute_engine
@@ -20,6 +21,7 @@ Submodules
 ----------
 
 .. toctree::
+   :maxdepth: 4
 
    google.auth.app_engine
    google.auth.credentials

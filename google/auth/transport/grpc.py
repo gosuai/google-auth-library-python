@@ -16,11 +16,13 @@
 
 from __future__ import absolute_import
 
-from concurrent import futures
 import logging
+import os
 
 import six
 
+from google.auth import environment_vars
+from google.auth import exceptions
 from google.auth.transport import _mtls_helper
 
 try:
@@ -51,15 +53,6 @@ class AuthMetadataPlugin(grpc.AuthMetadataPlugin):
             object used to refresh credentials as needed.
     """
 
-    # Python 2.7 has no default for max_workers.
-    # In Python >= 3.5, ThreadPoolExecutor defaults to the
-    # number of processors on the machine, multiplied by 5.
-    if six.PY2:  # pragma: NO COVER
-        max_workers = 5
-    else:
-        max_workers = None
-    _AUTH_THREAD_POOL = futures.ThreadPoolExecutor(max_workers=max_workers)
-
     def __init__(self, credentials, request):
         # pylint: disable=no-value-for-parameter
         # pylint doesn't realize that the super method takes no arguments
@@ -82,13 +75,6 @@ class AuthMetadataPlugin(grpc.AuthMetadataPlugin):
 
         return list(six.iteritems(headers))
 
-    @staticmethod
-    def _callback_wrapper(callback):
-        def wrapped(future):
-            callback(future.result(), None)
-
-        return wrapped
-
     def __call__(self, context, callback):
         """Passes authorization metadata into the given callback.
 
@@ -97,8 +83,7 @@ class AuthMetadataPlugin(grpc.AuthMetadataPlugin):
             callback (grpc.AuthMetadataPluginCallback): The callback that will
                 be invoked to pass in the authorization metadata.
         """
-        future = self._AUTH_THREAD_POOL.submit(self._get_authorization_headers, context)
-        future.add_done_callback(self._callback_wrapper(callback))
+        callback(self._get_authorization_headers(context), None)
 
 
 def secure_authorized_channel(
@@ -113,6 +98,9 @@ def secure_authorized_channel(
 
     This creates a channel with SSL and :class:`AuthMetadataPlugin`. This
     channel can be used to create a stub that can make authorized requests.
+    Users can configure client certificate or rely on device certificates to
+    establish a mutual TLS channel, if the `GOOGLE_API_USE_CLIENT_CERTIFICATE`
+    variable is explicitly set to `true`.
 
     Example::
 
@@ -155,7 +143,9 @@ def secure_authorized_channel(
             ssl_credentials=regular_ssl_credentials)
 
     Option 2: create a mutual TLS channel by calling a callback which returns
-    the client side certificate and the key::
+    the client side certificate and the key (Note that
+    `GOOGLE_API_USE_CLIENT_CERTIFICATE` environment variable must be explicitly
+    set to `true`)::
 
         def my_client_cert_callback():
             code_to_load_client_cert_and_key()
@@ -172,7 +162,9 @@ def secure_authorized_channel(
 
     Option 3: use application default SSL credentials. It searches and uses
     the command in a context aware metadata file, which is available on devices
-    with endpoint verification support.
+    with endpoint verification support (Note that
+    `GOOGLE_API_USE_CLIENT_CERTIFICATE` environment variable must be explicitly
+    set to `true`).
     See https://cloud.google.com/endpoint-verification/docs/overview::
 
         try:
@@ -191,7 +183,8 @@ def secure_authorized_channel(
             ssl_credentials=default_ssl_credentials)
 
     Option 4: not setting ssl_credentials and client_cert_callback. For devices
-    without endpoint verification support, a regular TLS channel is created;
+    without endpoint verification support or `GOOGLE_API_USE_CLIENT_CERTIFICATE`
+    environment variable is not `true`, a regular TLS channel is created;
     otherwise, a mutual TLS channel is created, however, the call should be
     wrapped in a try/except block in case of malformed context aware metadata.
 
@@ -222,30 +215,23 @@ def secure_authorized_channel(
             This argument is mutually exclusive with client_cert_callback;
             providing both will raise an exception.
             If ssl_credentials and client_cert_callback are None, application
-            default SSL credentials will be used.
+            default SSL credentials are used if `GOOGLE_API_USE_CLIENT_CERTIFICATE`
+            environment variable is explicitly set to `true`, otherwise one way TLS
+            SSL credentials are used.
         client_cert_callback (Callable[[], (bytes, bytes)]): Optional
             callback function to obtain client certicate and key for mutual TLS
             connection. This argument is mutually exclusive with
             ssl_credentials; providing both will raise an exception.
-            If ssl_credentials and client_cert_callback are None, application
-            default SSL credentials will be used.
+            This argument does nothing unless `GOOGLE_API_USE_CLIENT_CERTIFICATE`
+            environment variable is explicitly set to `true`.
         kwargs: Additional arguments to pass to :func:`grpc.secure_channel`.
 
     Returns:
         grpc.Channel: The created gRPC channel.
 
     Raises:
-        OSError: If the cert provider command launch fails during the application
-            default SSL credentials loading process on devices with endpoint
-            verification support.
-        RuntimeError: If the cert provider command has a runtime error during the
-            application default SSL credentials loading process on devices with
-            endpoint verification support.
-        ValueError:
-            If the context aware metadata file is malformed or if the cert provider
-            command doesn't produce both client certificate and key during the
-            application default SSL credentials loading process on devices with
-            endpoint verification support.
+        google.auth.exceptions.MutualTLSChannelError: If mutual TLS channel
+            creation failed for any reason.
     """
     # Create the metadata plugin for inserting the authorization header.
     metadata_plugin = AuthMetadataPlugin(credentials, request)
@@ -261,16 +247,21 @@ def secure_authorized_channel(
 
     # If SSL credentials are not explicitly set, try client_cert_callback and ADC.
     if not ssl_credentials:
-        if client_cert_callback:
+        use_client_cert = os.getenv(
+            environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE, "false"
+        )
+        if use_client_cert == "true" and client_cert_callback:
             # Use the callback if provided.
             cert, key = client_cert_callback()
             ssl_credentials = grpc.ssl_channel_credentials(
                 certificate_chain=cert, private_key=key
             )
-        else:
+        elif use_client_cert == "true":
             # Use application default SSL credentials.
             adc_ssl_credentils = SslCredentials()
             ssl_credentials = adc_ssl_credentils.ssl_credentials
+        else:
+            ssl_credentials = grpc.ssl_channel_credentials()
 
     # Combine the ssl credentials and the authorization credentials.
     composite_credentials = grpc.composite_channel_credentials(
@@ -283,20 +274,29 @@ def secure_authorized_channel(
 class SslCredentials:
     """Class for application default SSL credentials.
 
-    For devices with endpoint verification support, a device certificate will be
-    automatically loaded and mutual TLS will be established.
+    The behavior is controlled by `GOOGLE_API_USE_CLIENT_CERTIFICATE` environment
+    variable whose default value is `false`. Client certificate will not be used
+    unless the environment variable is explicitly set to `true`. See
+    https://google.aip.dev/auth/4114
+
+    If the environment variable is `true`, then for devices with endpoint verification
+    support, a device certificate will be automatically loaded and mutual TLS will
+    be established.
     See https://cloud.google.com/endpoint-verification/docs/overview.
     """
 
     def __init__(self):
-        # Load client SSL credentials.
-        self._context_aware_metadata_path = _mtls_helper._check_dca_metadata_path(
-            _mtls_helper.CONTEXT_AWARE_METADATA_PATH
+        use_client_cert = os.getenv(
+            environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE, "false"
         )
-        if self._context_aware_metadata_path:
-            self._is_mtls = True
-        else:
+        if use_client_cert != "true":
             self._is_mtls = False
+        else:
+            # Load client SSL credentials.
+            metadata_path = _mtls_helper._check_dca_metadata_path(
+                _mtls_helper.CONTEXT_AWARE_METADATA_PATH
+            )
+            self._is_mtls = metadata_path is not None
 
     @property
     def ssl_credentials(self):
@@ -311,20 +311,18 @@ class SslCredentials:
             grpc.ChannelCredentials: The created grpc channel credentials.
 
         Raises:
-            OSError: If the cert provider command launch fails.
-            RuntimeError: If the cert provider command has a runtime error.
-            ValueError:
-                If the context aware metadata file is malformed or if the cert provider
-                command doesn't produce both the client certificate and key.
+            google.auth.exceptions.MutualTLSChannelError: If mutual TLS channel
+                creation failed for any reason.
         """
-        if self._context_aware_metadata_path:
-            metadata = _mtls_helper._read_dca_metadata_file(
-                self._context_aware_metadata_path
-            )
-            cert, key = _mtls_helper.get_client_ssl_credentials(metadata)
-            self._ssl_credentials = grpc.ssl_channel_credentials(
-                certificate_chain=cert, private_key=key
-            )
+        if self._is_mtls:
+            try:
+                _, cert, key, _ = _mtls_helper.get_client_ssl_credentials()
+                self._ssl_credentials = grpc.ssl_channel_credentials(
+                    certificate_chain=cert, private_key=key
+                )
+            except exceptions.ClientCertError as caught_exc:
+                new_exc = exceptions.MutualTLSChannelError(caught_exc)
+                six.raise_from(new_exc, caught_exc)
         else:
             self._ssl_credentials = grpc.ssl_channel_credentials()
 
