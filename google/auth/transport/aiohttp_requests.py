@@ -168,12 +168,8 @@ class Request(transport.Request):
         """
 
         try:
-            if self.session is None:  # pragma: NO COVER
-                self.session = aiohttp.ClientSession(
-                    auto_decompress=False
-                )  # pragma: NO COVER
             requests._LOGGER.debug("Making request: %s %s", method, url)
-            response = await self.session.request(
+            response = await aiohttp.request(
                 method, url, data=body, headers=headers, timeout=timeout, **kwargs
             )
             return _CombinedResponse(response)
